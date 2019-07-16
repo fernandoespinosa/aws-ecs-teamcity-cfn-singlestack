@@ -86,19 +86,13 @@ Parameters:
 Mappings:
   RegionServerImageMap:
     us-east-1:
-      AMI: ami-02507631a9f7bc956
-    ca-central-1:
-      AMI: ami-04fc06e24a65297fb
+      AMI: ami-aff65ad2
   RegionAgentImageMap:
     us-east-1:
-      AMI: ami-02507631a9f7bc956
-    ca-central-1:
-      AMI: ami-04fc06e24a65297fb
+      AMI: ami-aff65ad2
   RegionBastionImageMap:
     us-east-1:
       AMI: ami-14c5486b
-    ca-central-1:
-      AMI: ami-338a0a57
 
 Conditions:
 

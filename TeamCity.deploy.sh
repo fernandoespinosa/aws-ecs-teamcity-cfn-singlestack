@@ -13,8 +13,8 @@ aws cloudformation deploy \
         AgentContainerCpu=2048 \
         AgentContainerMemory=7500 \
         AgentNumber=0 \
-        CertificateArn=arn:aws:acm:ca-central-1:879709723808:certificate/f02502df-9bb2-47de-841c-40dcf08c7de0 \
+        CertificateArn=arn:aws:acm:us-east-1:879709723808:certificate/3bfd5aa8-b81b-4209-bab1-ba6ae13cf8ae \
         CertificateDomainName=teamcity.dev.fernandoespinosa.org \
     --capabilities=CAPABILITY_IAM \
     --profile=aws-development \
-    --region=ca-central-1
+    --region=us-east-1
