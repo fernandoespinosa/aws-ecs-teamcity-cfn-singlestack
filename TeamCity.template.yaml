@@ -1,0 +1,885 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  This template deploys a TeamCity installation including server and build agents of the specified version from DockerHub.
+
+Parameters:
+  TeamCityVersion:
+    Type: String
+    AllowedPattern: ".+"
+    Default: latest
+
+  InternetFacingStack:
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    AllowedPattern: ".+"
+    Default: TeamCity
+
+  ServerContainerCpu:
+    Type: Number
+    Default: 2048
+
+  ServerContainerMemory:
+    Type: Number
+    Default: 3700
+
+  ServerInstanceType:
+    Type: String
+    Default: t2.medium
+    AllowedValues:
+      - t2.medium
+      - t2.large
+      - t2.xlarge
+      - t2.2xlarge
+
+  DBInstanceType:
+    Type: String
+    Default: db.t2.small
+    AllowedValues:
+      - db.t2.small
+
+  DBPassword:
+    Type: String
+    AllowedPattern: ".+"
+    MinLength: 8
+    NoEcho: true
+
+  AgentInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small    # t3.small	2	Variable	2 GiB	EBS Only	$0.0208 per Hour
+      - t3.medium   # t3.medium	2	Variable	4 GiB	EBS Only	$0.0416 per Hour
+      - t3.large    # t3.large	2	Variable	8 GiB	EBS Only	$0.0832 per Hour
+      # - a1.xlarge   # a1.xlarge	4	N/A	      8 GiB	EBS Only	$0.102 per Hour
+
+  AgentNumber:
+    Type: Number
+    Default: 3
+
+  AgentContainerCpu:
+    Type: Number
+    Default: 1024
+
+  AgentContainerMemory:
+    Type: Number
+    Default: 1875
+
+  CertificateDomainName:
+    Type: String
+    AllowedPattern: ^$|^(\*\.)?(((?!-)[A-Za-z0-9-]{0,62}[A-Za-z0-9])\.)+((?!-)[A-Za-z0-9-]{1,62}[A-Za-z0-9])$
+
+  CertificateArn:
+    Type: String
+
+  SshAccessSourceIPRange:
+    Type: String
+    AllowedPattern: ^$|([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$
+    ConstraintDescription: Should be valid CIDR
+    Default: 0.0.0.0/0
+
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI.html
+Mappings:
+  RegionServerImageMap:
+    us-east-1:
+      AMI: ami-02507631a9f7bc956
+    ca-central-1:
+      AMI: ami-04fc06e24a65297fb
+  RegionAgentImageMap:
+    us-east-1:
+      AMI: ami-02507631a9f7bc956
+    ca-central-1:
+      AMI: ami-04fc06e24a65297fb
+  RegionBastionImageMap:
+    us-east-1:
+      AMI: ami-14c5486b
+    ca-central-1:
+      AMI: ami-338a0a57
+
+Conditions:
+
+  IsInternetFacingStack:
+    !Equals [true, !Ref InternetFacingStack]
+
+  ShouldLaunchAgents:
+    !Not [!Equals [0, !Ref AgentNumber]]
+
+  # ShouldRequestCertificate:
+  #   !Not [!Equals ['', !Ref CertificateDomainName]]
+
+  EnableExternalSshAccess:
+    !Not [!Equals ['', !Ref SshAccessSourceIPRange]]
+
+Resources:
+
+  VPC:
+      Type: AWS::EC2::VPC
+      Properties:
+          CidrBlock: 10.0.0.0/16
+          EnableDnsHostnames: true
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}:InternetGateway
+
+  NatGatewayEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      AllocationId:
+        Fn::GetAtt:
+        - NatGatewayEIP1
+        - AllocationId
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}:NatGateway
+
+  InternetGatewayAttachment:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+          InternetGatewayId: !Ref InternetGateway
+          VpcId: !Ref VPC
+
+  PublicSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+          VpcId: !Ref VPC
+          AvailabilityZone: !Select [ 0, !GetAZs "" ]
+          CidrBlock: 10.0.0.0/24
+          MapPublicIpOnLaunch: true
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PublicSubnet:AZ1
+
+  PublicSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+          VpcId: !Ref VPC
+          AvailabilityZone: !Select [ 1, !GetAZs "" ]
+          CidrBlock: 10.0.1.0/24
+          MapPublicIpOnLaunch: true
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PublicSubnet:AZ2
+
+  PrivateSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+          VpcId: !Ref VPC
+          AvailabilityZone: !Select [ 0, !GetAZs "" ]
+          CidrBlock: 10.0.2.0/24
+          MapPublicIpOnLaunch: false
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PrivateSubnet:AZ1
+
+  PrivateSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+          VpcId: !Ref VPC
+          AvailabilityZone: !Select [ 1, !GetAZs "" ]
+          CidrBlock: 10.0.3.0/24
+          MapPublicIpOnLaunch: false
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PrivateSubnet:AZ2
+
+  PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+          VpcId: !Ref VPC
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PublicRouteTable
+
+  DefaultPublicRoute:
+      Type: AWS::EC2::Route
+      DependsOn: InternetGatewayAttachment
+      Properties:
+          RouteTableId: !Ref PublicRouteTable
+          DestinationCidrBlock: 0.0.0.0/0
+          GatewayId: !Ref InternetGateway
+
+  NatGatewayRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  NatGatewayRoute2:
+    Type: AWS::EC2::Route
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PublicSubnet1RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+          RouteTableId: !Ref PublicRouteTable
+          SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+          RouteTableId: !Ref PublicRouteTable
+          SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+      Type: AWS::EC2::RouteTable
+      Properties:
+          VpcId: !Ref VPC
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PrivateRouteTable1:AZ1
+
+  PrivateSubnet1RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+          RouteTableId: !Ref PrivateRouteTable1
+          SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+      Type: AWS::EC2::RouteTable
+      Properties:
+          VpcId: !Ref VPC
+          Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}:PrivateRouteTable2:AZ2
+
+  PrivateSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+          RouteTableId: !Ref PrivateRouteTable2
+          SubnetId: !Ref PrivateSubnet2
+
+  PublicAccessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}:Public
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "tcp"
+          FromPort: "443"
+          ToPort: "443"
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "tcp"
+          FromPort: "80"
+          ToPort: "80"
+
+  AnywhereAccessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}:Anywhere
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: !If [IsInternetFacingStack, 'internet-facing', 'internal']
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref PublicAccessSecurityGroup
+        - !Ref TeamCityServerAccessSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}:PublicLoadBalancer
+
+  TeamCityServerNodeTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 6
+        HealthCheckPath: /login.html
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 5
+        HealthyThresholdCount: 2
+        TargetGroupAttributes:
+          - Key: deregistration_delay.timeout_seconds
+            Value: '10'
+        Matcher:
+          HttpCode: "200,302"
+        Port: 8111
+        Protocol: HTTP
+        TargetType: instance
+        VpcId: !Ref 'VPC'
+
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - PublicLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TeamCityServerNodeTargetGroup
+          Type: 'forward'
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      # ClusterName: !Ref AWS::StackName
+      ClusterName: !Sub ${AWS::StackName}-Cluster
+
+  TeamCityServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchConfigurationName: !Ref "TeamCityServerLaunchConfiguration"
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      Tags:
+        - Key: teamcity.node-responsibility
+          Value: !Sub ${AWS::StackName}:Server
+          PropagateAtLaunch: 'true'
+
+  AgentAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: ShouldLaunchAgents
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchConfigurationName: !Ref AgentLaunchConfiguration
+      MinSize: !Ref AgentNumber
+      MaxSize: !Ref AgentNumber
+      DesiredCapacity: !Ref AgentNumber
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}:Build-Agent
+          PropagateAtLaunch: true
+        - Key: teamcity.node-responsibility
+          Value: !Sub ${AWS::StackName}:Build-Agent
+          PropagateAtLaunch: true
+
+  TeamCityServerAccessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref 'VPC'
+      GroupDescription: !Sub ${AWS::StackName}:Server
+
+  TeamCityServerSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      GroupId:
+        Fn::GetAtt:
+          - TeamCityServerAccessSecurityGroup
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - TeamCityServerAccessSecurityGroup
+        - GroupId
+
+  TeamCityServerLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [ RegionServerImageMap, !Ref 'AWS::Region' , "AMI" ]
+      KeyName: !Ref 'KeyName'
+      InstanceType: !Ref ServerInstanceType
+      SecurityGroups:
+        - !Ref RDSSecurityGroup
+        - !Ref SshAccessSecurityGroup
+        - !Ref TeamCityServerAccessSecurityGroup
+      IamInstanceProfile: !Ref ECSNodeInstanceProfile
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeSize: 10
+          VolumeType: gp2
+      - DeviceName: /dev/xvdg
+        Ebs:
+          VolumeSize: 10
+          VolumeType: gp2
+          DeleteOnTermination: false
+      UserData:
+        Fn::Base64: !Sub |
+           #!/bin/bash
+           echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+           echo ECS_INSTANCE_ATTRIBUTES={\"teamcity.node-responsibility\": \"server\"} >> /etc/ecs/ecs.config
+
+  AgentLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Condition: ShouldLaunchAgents
+    Properties:
+      ImageId: !FindInMap [RegionAgentImageMap, !Ref 'AWS::Region', AMI]
+      KeyName: !Ref KeyName
+      InstanceType: !Ref AgentInstanceType
+      SecurityGroups:
+        - !Ref SshAccessSecurityGroup
+        - !Ref TeamCityServerAccessSecurityGroup
+      IamInstanceProfile: !Ref ECSNodeInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          echo ECS_INSTANCE_ATTRIBUTES={\"teamcity.node-responsibility\": \"buildAgent\"} >> /etc/ecs/ecs.config
+
+  ECSNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref ECSNodeInstanceRole
+
+  ECSNodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+
+  TeamCityServerNodeTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - RDSDB
+      - ServerMemory
+    Properties:
+      PlacementConstraints:
+        - Type: memberOf
+          Expression: attribute:teamcity.node-responsibility == server
+      Volumes:
+        - Name: data
+          Host:
+            SourcePath: /mnt/efs
+        - Name: logs
+          Host:
+            SourcePath: /mnt/data/logs/teamcity
+        - Name: temp
+          Host:
+            SourcePath: /mnt/data/temp/teamcity
+      ContainerDefinitions:
+        - Name: 'teamcity-server'
+          Image: !Join [':', ['jetbrains/teamcity-server', !Ref 'TeamCityVersion']]
+          Cpu: !Ref ServerContainerCpu
+          Memory: !Ref ServerContainerMemory
+          Essential: true
+          Command:
+            - "/bin/bash"
+            - "-c"
+            - !Sub
+              - "if [ ! -f /data/teamcity_server/datadir/lib/jdbc ]; then mkdir -p /data/teamcity_server/datadir/lib/jdbc; curl -o /data/teamcity_server/datadir/lib/jdbc/mysql-connector-java-bin.jar http://central.maven.org/maven2/mysql/mysql-connector-java/5.1.43/mysql-connector-java-5.1.43.jar; fi; if [ ! -f /data/teamcity_server/datadir/config/database.properties ]; then mkdir -p /data/teamcity_server/datadir/config; echo connectionProperties.user=teamcity > /data/teamcity_server/datadir/config/database.properties; echo connectionProperties.password=${RDSPassword} >> /data/teamcity_server/datadir/config/database.properties; echo connectionUrl=jdbc:mysql://${RDSAddress}/teamcitydb >> /data/teamcity_server/datadir/config/database.properties; fi; if [ ! -f /data/teamcity_server/datadir/plugins ]; then mkdir -p /data/teamcity_server/datadir/plugins; curl -o /data/teamcity_server/datadir/plugins/aws-ecs.zip https://teamcity.jetbrains.com/guestAuth/app/rest/builds/buildType:TestDrive_TeamCityAmazonEcsPlugin_Build20172x,tag:release/artifacts/content/aws-ecs.zip; fi; echo 'docker-ubuntu-aws' > /opt/teamcity/webapps/ROOT/WEB-INF/DistributionType.txt; exec /run-services.sh;"
+              - {
+                  RDSAddress: !GetAtt [RDSDB, Endpoint.Address],
+                  RDSPassword: !Ref 'DBPassword',
+                  TeamCityVersion: !Ref 'TeamCityVersion'
+                }
+          Environment:
+            - Name: TEAMCITY_SERVER_MEM_OPTS
+              Value: !Sub
+                - "-Xmx${ServerMemory}m -XX:MaxPermSize=270m -XX:ReservedCodeCacheSize=350m"
+                - {
+                    ServerMemory: !GetAtt [ServerMemory, Value]
+                  }
+          MountPoints:
+            - ContainerPath: /data/teamcity_server/datadir
+              SourceVolume: data
+            - ContainerPath: /opt/teamcity/logs
+              SourceVolume: logs
+            - ContainerPath: /opt/teamcity/temp
+              SourceVolume: temp
+          PortMappings:
+            - ContainerPort: 8111
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'aws/ecs/teamcity-server'
+
+  AgentTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: ShouldLaunchAgents
+    DependsOn:
+      - PublicLoadBalancer
+      - TeamCityServerNodeService
+    Properties:
+      PlacementConstraints:
+        - Type: memberOf
+          Expression: attribute:teamcity.node-responsibility == buildAgent
+      ContainerDefinitions:
+        - Name: 'teamcity-agent'
+          # Image: !Join [':', ['jetbrains/teamcity-agent', !Ref 'TeamCityVersion']]
+          Image: 527670428074.dkr.ecr.us-east-1.amazonaws.com/teamcity-node-agent:latest
+          Cpu: !Ref AgentContainerCpu
+          Memory: !Ref AgentContainerMemory
+          Essential: true
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'aws/ecs/teamcity-agent'
+          # Privileged: true
+          Environment:
+            - Name: SERVER_URL
+              Value: !GetAtt [PublicLoadBalancer, DNSName]
+            # - Name: DOCKER_IN_DOCKER
+            #   Value: start
+          MountPoints:
+            # - ContainerPath: /var/lib/docker
+            #   SourceVolume: docker_volumes
+            - ContainerPath: /var/run/docker.sock
+              SourceVolume: docker_sock
+            - ContainerPath: /opt/buildagent/work
+              SourceVolume: buildagent_work
+            - ContainerPath: /opt/buildagent/temp
+              SourceVolume: buildagent_temp
+            - ContainerPath: /opt/buildagent/tools
+              SourceVolume: buildagent_tools
+            - ContainerPath: /opt/buildagent/plugins
+              SourceVolume: buildagent_plugins
+            - ContainerPath: /opt/buildagent/system
+              SourceVolume: buildagent_system
+      Volumes:
+        # - Name: docker_volumes
+        #   Host:
+        #     SourcePath: docker_volumes
+        - Name: docker_sock
+          Host:
+            SourcePath: /var/run/docker.sock
+        - Name: buildagent_work
+          Host:
+            SourcePath: /opt/buildagent/work
+        - Name: buildagent_temp
+          Host:
+            SourcePath: /opt/buildagent/temp
+        - Name: buildagent_tools
+          Host:
+            SourcePath: /opt/buildagent/tools
+        - Name: buildagent_plugins
+          Host:
+            SourcePath: /opt/buildagent/plugins
+        - Name: buildagent_system
+          Host:
+            SourcePath: /opt/buildagent/system
+
+  TeamCityServerNodeService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - TeamCityServerAutoScalingGroup
+      - PublicLoadBalancer
+    Properties:
+      # ServiceName: !Join ['_', [!Ref 'AWS::StackName', 'TeamCityServer', 'MainNode']]
+      ServiceName: !Sub ${AWS::StackName}-Server
+      Cluster:
+        Ref: ECSCluster
+      LaunchType: EC2
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      DesiredCount: 1
+      HealthCheckGracePeriodSeconds: 600
+      TaskDefinition:
+        Ref: "TeamCityServerNodeTaskDefinition"
+      PlacementStrategies:
+        - Type: "spread"
+          Field: "attribute:ecs.availability-zone"
+      LoadBalancers:
+        - ContainerName: 'teamcity-server'
+          ContainerPort: 8111
+          TargetGroupArn:
+            Ref: TeamCityServerNodeTargetGroup
+
+  AgentService:
+    Type: AWS::ECS::Service
+    Condition: ShouldLaunchAgents
+    DependsOn:
+      - AgentAutoScalingGroup
+    Properties:
+      ServiceName: !Sub ${AWS::StackName}-AgentService
+      Cluster:
+        Ref: ECSCluster
+      LaunchType: EC2
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      DesiredCount: !Ref AgentNumber
+      TaskDefinition:
+        Ref: "AgentTaskDefinition"
+
+  SshAccessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}:SSH
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+
+  # RDS
+
+  RDSDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: '5'
+      DBInstanceClass: !Ref 'DBInstanceType'
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-MySQL
+      DBName: 'teamcitydb'
+      DBSubnetGroupName: !Ref 'RDSSubnetGroup'
+      VPCSecurityGroups:
+      - Ref: RDSSecurityGroup
+      Engine: MySQL
+      EngineVersion: 5.5.54
+      MasterUsername: teamcity
+      MasterUserPassword: !Ref 'DBPassword'
+      DBParameterGroupName: !Ref 'RDSParamGroup'
+      PubliclyAccessible: false
+    DeletionPolicy: Snapshot
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref 'VPC'
+      GroupDescription: !Sub ${AWS::StackName}:RDSSecurityGroup
+
+  RDSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      GroupId:
+        Fn::GetAtt:
+          - RDSSecurityGroup
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - RDSSecurityGroup
+        - GroupId
+
+  RDSParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: MySQL5.5
+      Description: !Sub ${AWS::StackName}:DBParameterGroup
+      Parameters:
+        long_query_time: "5"
+        slow_query_log: "1"
+        innodb_flush_log_at_trx_commit: "2"
+        character_set_server: "utf8"
+        collation_server: "utf8_bin"
+        max_allowed_packet: "16777216"
+
+  RDSSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: !Sub ${AWS::StackName}:DBSubnetGroup
+      SubnetIds:
+        - !Ref 'PrivateSubnet1'
+        - !Ref 'PrivateSubnet2'
+
+  #  Logging
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 1
+
+  #SSL support
+  # Certificate:
+  #   Type: AWS::CertificateManager::Certificate
+  #   # Condition: ShouldRequestCertificate
+  #   Properties:
+  #     DomainName: !Ref 'CertificateDomainName'
+
+  SecuredLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    # Condition: ShouldRequestCertificate
+    DependsOn:
+      - PublicLoadBalancer
+      # - Certificate
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TeamCityServerNodeTargetGroup
+          Type: 'forward'
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: "ELBSecurityPolicy-2016-08"
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+  # Utils
+  ServerMemory:
+    Type: Custom::ServerMemory
+    DependsOn:
+      - ServerMemoryFunction
+    Properties:
+      ServiceToken: !GetAtt ServerMemoryFunction.Arn
+      Region: !Ref "AWS::Region"
+      Input: !Ref ServerContainerMemory
+
+  ServerMemoryFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - LambdaExecutionRole
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          var response = require('cfn-response');
+          exports.lambda_handler = function(event, context) {
+            var input = parseInt(event.ResourceProperties.Input);
+            var responseData = { Value: input / 2 };
+            response.send(event, context, response.SUCCESS, responseData);
+          }
+      Handler: "index.lambda_handler"
+      Runtime: nodejs8.10
+      Timeout: 30
+      Role: !GetAtt [ LambdaExecutionRole, Arn ]
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+
+  #  SSH bastion host
+
+  SshBastionHostPublicEIP:
+    Type: AWS::EC2::EIP
+    Condition: EnableExternalSshAccess
+    Properties:
+      Domain: vpc
+
+  SshBastionAccessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: EnableExternalSshAccess
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}:SSH-Bastion
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+        - CidrIp: !Ref SshAccessSourceIPRange
+          IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+
+  SshBastionHostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: EnableExternalSshAccess
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref SshBastionHostInstanceRole
+
+  SshBastionHostInstanceRole:
+    Type: AWS::IAM::Role
+    Condition: EnableExternalSshAccess
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+
+  SshBastionHostInstanceRolePolicies:
+      Type: "AWS::IAM::Policy"
+      Condition: EnableExternalSshAccess
+      Properties:
+        PolicyName: "root"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "ec2:ReleaseAddress"
+                - "ec2:DisassociateAddress"
+                - "ec2:DescribeAddresses"
+                - "ec2:AssociateAddress"
+              Resource: "*"
+        Roles:
+          - Ref: "SshBastionHostInstanceRole"
+
+  SshBastionHostLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Condition: EnableExternalSshAccess
+    DependsOn: SshBastionHostPublicEIP
+    Properties:
+      # Amazon Linux AMI 2018.03.0 (HVM)
+      ImageId: !FindInMap [ RegionBastionImageMap, !Ref 'AWS::Region' , "AMI" ]
+      KeyName: !Ref 'KeyName'
+      InstanceType: t2.micro
+      SecurityGroups:
+        - !Ref SshAccessSecurityGroup
+        - !Ref SshBastionAccessSecurityGroup
+      IamInstanceProfile: !Ref SshBastionHostInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+           #!/bin/bash
+           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+           export AWS_DEFAULT_REGION=${AWS::Region}
+           aws ec2 disassociate-address --association-id ${SshBastionHostPublicEIP.AllocationId}
+           aws ec2 associate-address --instance-id $INSTANCE_ID --allocation-id ${SshBastionHostPublicEIP.AllocationId} --allow-reassociation
+
+  SshBastionHostAutoscalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: EnableExternalSshAccess
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchConfigurationName: !Ref SshBastionHostLaunchConfiguration
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: !If [EnableExternalSshAccess, 1, 0]
+      Tags:
+        - Key: teamcity.node-responsibility
+          Value: !Sub ${AWS::StackName}:SSH-Bastion-Host
+          PropagateAtLaunch: 'true'
+
+Outputs:
+  TeamCityServerUrl:
+    Description: TeamCity Server URL
+    # Value: !Join ["", [ !If [ShouldRequestCertificate, "https://", "http://" ] , !GetAtt [PublicLoadBalancer, DNSName], "/" ]]
+    Value: !Join ["", ["https://", !GetAtt [PublicLoadBalancer, DNSName], "/" ]]
+
+  SSHBastionHostIP:
+    Description: SSH Bastion Host IP
+    Value: !If [EnableExternalSshAccess, !Ref SshBastionHostPublicEIP, 'not provided']
+

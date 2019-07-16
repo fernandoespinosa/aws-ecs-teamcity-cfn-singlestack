@@ -1,0 +1,11 @@
+{
+  "name": "aws-teamcity-cluster",
+  "version": "1.0.0",
+  "main": "index.js",
+  "repository": "git@github.com:fernandoespinosa/aws-teamcity-cluster.git",
+  "author": "Fernando Espinosa <fernandoespinosa@fernandoespinosa.org>",
+  "license": "MIT",
+  "scripts": {
+    "deploy:ca-central-1": "bash TeamCity.deploy.sh"
+  }
+}
