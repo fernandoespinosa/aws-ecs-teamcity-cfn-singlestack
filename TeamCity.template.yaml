@@ -532,8 +532,8 @@ Resources:
           Expression: attribute:teamcity.node-responsibility == buildAgent
       ContainerDefinitions:
         - Name: 'teamcity-agent'
-          # Image: !Join [':', ['jetbrains/teamcity-agent', !Ref 'TeamCityVersion']]
-          Image: 527670428074.dkr.ecr.us-east-1.amazonaws.com/teamcity-node-agent:latest
+          Image: !Join [':', ['jetbrains/teamcity-agent', !Ref 'TeamCityVersion']]
+          # Image: 527670428074.dkr.ecr.us-east-1.amazonaws.com/teamcity-node-agent:latest
           Cpu: !Ref AgentContainerCpu
           Memory: !Ref AgentContainerMemory
           Essential: true
