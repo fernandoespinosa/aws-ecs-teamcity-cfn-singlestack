@@ -6,6 +6,6 @@
   "author": "Fernando Espinosa <fernandoespinosa@fernandoespinosa.org>",
   "license": "MIT",
   "scripts": {
-    "deploy:ca-central-1": "bash TeamCity.deploy.sh"
+    "deploy": "bash TeamCity.deploy.sh"
   }
 }
